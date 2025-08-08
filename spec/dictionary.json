@@ -1,0 +1,20 @@
+{
+  "tokens": {
+    "M": "Model definition; defines a record type; e.g. M1 { U1:uuid, U2:txt }",
+    "U": "Field definition; used within model definitions; U# names fields",
+    "E": "Enum definition; defines a finite list of values; e.g. E1 = [0,1,2]",
+    "P": "Property; declarative invariant or constraint over models or fields",
+    "R": "Route; defines an API endpoint; includes method, path, effect pipeline and budget constraints",
+    "T": "Transition; defines state transitions for enums"
+  },
+  "capabilities": {
+    "kv.get": "Get a single value from key-value storage by key",
+    "kv.scan": "Scan keys by prefix or pattern in key-value store",
+    "kv.set": "Set a value in key-value storage",
+    "http.post": "Send an HTTP POST request to an external service",
+    "http.get": "Send an HTTP GET request to an external service",
+    "clock.now": "Obtain the current timestamp from the clock",
+    "crypto.hash": "Compute a cryptographic hash of input bytes"
+  },
+  "usage": "This dictionary defines the primitive tokens and capabilities for Nova v0. Tokens M, U, E, P, R, T represent constructs in the language. Capabilities enumerate built-in effects available to programs."
+}
