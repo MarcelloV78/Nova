@@ -1,0 +1,15 @@
+# Models
+M1 { U1:uuid, U2:txt, U3:mon>=0, U4:e[E1], U5:txt, U6:time }
+E1 = [0,1,2,3,4,5]
+
+# Properties
+P1: ∀x∈M1 . U3(x)≥0
+P2: mono(U4, E1)
+
+# Routes (+ effects) + Budgets
+R1: GET /j    -> [M1] :: kv.scan("j:") | filter(U4 in ?q.s) | filter(U2 ~ ?q.q) | page(50) !p99<500ms
+R2: GET /j/{U1} -> M1 :: kv.get("j:"+U1)
+R3: POST /j/{U1}/p -> ok :: req(U4 ∈ [2,3]) | http.post("m","/u/"+U1)
+
+# Transitions
+T1: E1 0→1→2→3→4→5
