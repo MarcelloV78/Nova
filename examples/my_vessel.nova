@@ -1,0 +1,46 @@
+# Simplified Nova program representing core My Vessel functionality.
+# This example focuses on two entities: jobs and inventory items. It
+# demonstrates how a real application can be modelled as Nova specs
+# with models, enums, properties, routes and state transitions.
+
+# Models
+M1 { U1:uuid, U2:txt, U3:mon>=0, U4:e[E1], U5:txt }
+# Job entity fields:
+# U1 = id (uuid)
+# U2 = title
+# U3 = price (monetary amount, must be \u2265 0)
+# U4 = status (enum E1)
+# U5 = vesselId (string)
+
+M2 { U1:uuid, U2:txt, U3:int>=0, U4:txt, U5:e[E2] }
+# Inventory item fields:
+# U1 = id (uuid)
+# U2 = name
+# U3 = quantity (integer, must be \u2265 0)
+# U4 = vesselId
+# U5 = status (enum E2)
+
+# Enums
+E1 = [0,1,2,3,4,5]
+# Job status: 0 Draft, 1 Scheduled, 2 InProgress, 3 QA, 4 Invoiced, 5 Closed
+E2 = [0,1,2]
+# Inventory status: 0 Available, 1 Reserved, 2 Sold
+
+# Properties
+P1: \u2200x\u2208M1 . U3(x) \u2265 0
+P2: mono(U4, E1)
+P3: \u2200x\u2208M2 . U3(x) \u2265 0
+P4: mono(U5, E2)
+
+# Routes (+ effects) + Budgets
+R1: GET /api/jobs -> [M1] :: kv.scan("j:") | page(50) !p99<500ms
+R2: GET /api/jobs/{U1} -> M1 :: kv.get("j:"+U1)
+R3: POST /api/jobs -> ok :: kv.set("j:"+U1, M1)
+
+R4: GET /api/inventory -> [M2] :: kv.scan("i:") | page(50) !p99<500ms
+R5: GET /api/inventory/{U1} -> M2 :: kv.get("i:"+U1)
+R6: POST /api/inventory -> ok :: kv.set("i:"+U1, M2)
+
+# Transitions
+T1: E1 0\u21921\u21922\u21923\u21924\u21925
+T2: E2 0\u21921\u21922
