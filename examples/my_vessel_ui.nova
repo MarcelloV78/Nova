@@ -1,0 +1,17 @@
+# Nova UI spec for My Vessel
+
+Screen: JobsList
+route: R1
+fields: U1,U2,U3,U4,U5,U6
+layout: table
+actions: openJob(U1)
+filterable: U4(status), U2(title)
+pageSize: 50
+
+Screen: InventoryList
+route: R4
+fields: U1,U2,U3,U4
+layout: table
+actions: openItem(U1)
+filterable: U2(name), U4(category)
+pageSize: 50
