@@ -1,4 +1,4 @@
-/*
+/**
  * Nova runtime runner for Node.js.
  *
  * This module reads a compiled Nova program (machine specification) from
@@ -11,7 +11,13 @@
  * appropriate runtime capabilities (kv, http, clock, crypto) exposed
  * by the Runtime class.
  */
+
 const http = require('http');
+// Load the Nova dictionary of primitives and capabilities. This defines
+// which effect functions are allowed in Nova v0. If the spec file
+// changes, update this require accordingly. The dictionary is used to
+// validate segments in pipelines during compilation.
+const dictionary = require('../../spec/dictionary.json');
 const { parseFile } = require('../compiler/index.js');
 const { Runtime } = require('./index.js');
 
@@ -242,6 +248,93 @@ async function executePipeline(segments, ctx) {
 }
 
 /**
+ * Check properties defined in the AST against the runtime's current data.
+ * Currently this implementation only supports simple non‑negative constraints
+ * of the form ∀x∈M#. U#(x)≥0. If any record violates the constraint, it
+ * returns false. For unsupported properties it returns true.
+ *
+ * @param {Object} ast Parsed Nova program
+ * @param {Runtime} runtime Runtime instance containing the kv store
+ * @returns {boolean} true if all supported properties hold
+ */
+function checkProperties(ast, runtime) {
+  if (!ast.properties) return true;
+  for (const key of Object.keys(ast.properties)) {
+    const prop = ast.properties[key];
+    // Check for simple numeric comparison on U# fields. Supports
+    // patterns like "U3(x) ≥ 0", "U3(x) > 10", "U3(x) <= 100".
+    const cmpMatch = prop.match(/U(\d+)\(x\)\s*([<>]=?|≥|≤)\s*(\d+)/);
+    if (cmpMatch) {
+      const field = `U${cmpMatch[1]}`;
+      let op = cmpMatch[2];
+      const threshold = Number(cmpMatch[3]);
+      // normalise unicode comparators
+      if (op === '≥') op = '>=';
+      if (op === '≤') op = '<=';
+      // Determine a prefix from the first route's kv.scan or use default 'j:'
+      let prefix = 'j:';
+      if (ast.routes) {
+        const firstRoute = Object.values(ast.routes)[0];
+        const parts = firstRoute.split('::').map(s => s.trim());
+        if (parts[1] && parts[1].startsWith('kv.scan')) {
+          const m = parts[1].match(/kv\.scan\("(.*)"\)/);
+          if (m) prefix = m[1];
+        }
+      }
+      const items = runtime.kvScan(prefix);
+      for (const item of items) {
+        if (item[field] === undefined) continue;
+        const value = Number(item[field]);
+        if (isNaN(value)) return false;
+        switch (op) {
+          case '>':
+            if (!(value > threshold)) return false;
+            break;
+          case '>=':
+            if (!(value >= threshold)) return false;
+            break;
+          case '<':
+            if (!(value < threshold)) return false;
+            break;
+          case '<=':
+            if (!(value <= threshold)) return false;
+            break;
+        }
+      }
+    }
+    // Support monotonic property specification like mono(U4, E1).
+    const monoMatch = prop.match(/mono\(\s*(U\d+)\s*,\s*E(\d+)\s*\)/i);
+    if (monoMatch) {
+      const field = monoMatch[1];
+      const enumId = `E${monoMatch[2]}`;
+      const allowed = (ast.enums && ast.enums[enumId]) || [];
+      // Determine prefix same way as above
+      let prefix = 'j:';
+      if (ast.routes) {
+        const first = Object.values(ast.routes)[0];
+        const parts = first.split('::').map(s => s.trim());
+        if (parts[1] && parts[1].startsWith('kv.scan')) {
+          const m = parts[1].match(/kv\.scan\("(.*)"\)/);
+          if (m) {
+            prefix = m[1];
+          }
+        }
+      }
+      const items = runtime.kvScan(prefix);
+      for (const item of items) {
+        const val = item[field];
+        if (val === undefined) continue;
+        // ensure string match to allowed enumeration values
+        if (!allowed.map(String).includes(String(val))) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * Main runner function. Given a Nova file and optional port, this
  * function parses the program, seeds the runtime with dummy data
  * (jobs) and starts an HTTP server handling the defined routes.
@@ -252,7 +345,7 @@ async function executePipeline(segments, ctx) {
 async function run(filePath, port = 3000) {
   const ast = parseFile(filePath);
   const runtime = new Runtime();
-  // Seed in-memory store with dummy job data. Each job is stored
+  // Seed in‑memory store with dummy job data. Each job is stored
   // under a key prefixed with 'j:' and has fields U1 through U6.
   const statuses = [0, 1, 2, 3, 4, 5];
   for (let i = 1; i <= 100; i++) {
@@ -268,18 +361,49 @@ async function run(filePath, port = 3000) {
     runtime.kvSet('j:' + id, job);
   }
 
-  // Compile routes
+  // Compile routes. Extract budgets from segments starting with '!'
   const compiled = [];
   for (const spec of Object.values(ast.routes)) {
     const parts = spec.split('::').map(s => s.trim());
     const pathPart = parts[0];
     const pipeline = parts[1] || '';
     const { method, path } = parsePathPart(pathPart);
+    const rawSegments = parsePipeline(pipeline);
+    const segments = [];
+    const budgets = [];
+    for (const seg of rawSegments) {
+      if (seg.startsWith('!')) {
+        // parse budget e.g. !p99<500ms
+        const m = seg.match(/p(\d+)<(\d+)(ms|s)/);
+        if (m) {
+          const percentile = parseInt(m[1], 10);
+          let threshold = parseInt(m[2], 10);
+          const unit = m[3];
+          if (unit === 's') threshold = threshold * 1000;
+          budgets.push({ percentile, threshold });
+        }
+        continue;
+      }
+      // Validate effect capabilities for segments that call runtime functions.
+      const capMatch = seg.match(/^([a-zA-Z0-9_.]+)\(/);
+      if (capMatch) {
+        const cap = capMatch[1];
+        // Ignore built-in pipeline functions not defined in capabilities
+        if (!['filter', 'page', 'req'].includes(cap)) {
+          if (!dictionary.capabilities[cap]) {
+            throw new Error(`Unknown capability: ${cap}`);
+          }
+        }
+      }
+      segments.push(seg);
+    }
     compiled.push({
       method,
       path,
       regex: buildPathRegex(path),
-      segments: parsePipeline(pipeline),
+      segments,
+      budgets,
+      latencies: [],
     });
   }
 
@@ -294,8 +418,33 @@ async function run(filePath, port = 3000) {
       if (m) {
         const pathVars = m.groups || {};
         const ctx = { runtime, pathVars, searchParams };
+        const startTime = Date.now();
         try {
           const result = await executePipeline(route.segments, ctx);
+          const duration = Date.now() - startTime;
+          route.latencies.push(duration);
+          // Evaluate budgets if defined
+          for (const budget of route.budgets) {
+            const sorted = route.latencies.slice().sort((a, b) => a - b);
+            const idx = Math.ceil((budget.percentile / 100) * sorted.length) - 1;
+            const pVal = sorted[Math.max(0, idx)];
+            if (pVal > budget.threshold) {
+              console.warn(`Budget violation on ${method} ${route.path}: p${budget.percentile}=${pVal}ms > ${budget.threshold}ms`);
+            }
+          }
+          // Check properties after each request
+          const propsOk = checkProperties(ast, runtime);
+          if (!propsOk) {
+            console.warn('Property check failed');
+          }
+          // Suggest optimisations in the background. This function
+          // analyses the compiled routes and budgets to propose
+          // improvements such as adding pagination. These suggestions
+          // are logged and do not modify the running service.
+          const suggestions = suggestOptimizations(ast, compiled);
+          for (const suggestion of suggestions) {
+            console.info(`Suggestion for ${suggestion.route}: ${suggestion.suggestion}`);
+          }
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(result));
@@ -314,7 +463,42 @@ async function run(filePath, port = 3000) {
   console.log(`Nova service running at http://localhost:${port}`);
 }
 
-module.exports = { run };
+/**
+ * Suggest optimisations for compiled routes based on budgets and pipeline
+ * segments. If a route defines a budget but has no pagination, a
+ * suggestion to add a page() segment is returned. If pagination
+ * exists but uses a large page size (>50), the suggestion proposes
+ * reducing it to 50. These suggestions are advisory only and do not
+ * modify the program.
+ *
+ * @param {Object} ast Parsed Nova program
+ * @param {Array} compiled List of compiled route objects
+ * @returns {Array<{route:string,suggestion:string}>}
+ */
+function suggestOptimizations(ast, compiled) {
+  const suggestions = [];
+  for (const route of compiled) {
+    // Only consider routes with budgets
+    if (!route.budgets || route.budgets.length === 0) continue;
+    const segments = route.segments;
+    // Find page segment
+    const pageSeg = segments.find(s => s.startsWith('page('));
+    if (!pageSeg) {
+      suggestions.push({ route: route.path, suggestion: 'Add page(50) to limit results and improve latency.' });
+      continue;
+    }
+    const m = pageSeg.match(/page\((\d+)\)/);
+    if (m) {
+      const size = parseInt(m[1], 10);
+      if (size > 50) {
+        suggestions.push({ route: route.path, suggestion: `Reduce page size from ${size} to 50 to meet latency budget.` });
+      }
+    }
+  }
+  return suggestions;
+}
+
+module.exports = { run, checkProperties, suggestOptimizations };
 
 // Allow direct execution: `node runner.js <file> [port]`
 if (require.main === module) {
